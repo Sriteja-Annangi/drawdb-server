@@ -1,25 +1,30 @@
 const express = require("express");
+const serverless = require("serverless-http");
 const app = express();
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const bodyparser = require("body-parser");
 const dotenv = require("dotenv").config();
 
-const { PORT, CLIENT_URLS, EMAIL_PASS, EMAIL_USER, EMAIL_REPORT } = process.env;
+const { CLIENT_URLS, EMAIL_PASS, EMAIL_USER, EMAIL_REPORT } = process.env;
 
-const whitelist = CLIENT_URLS.split(",");
+const whitelist = CLIENT_URLS ? CLIENT_URLS.split(",") : [];
 
 app.use(express.json());
 app.use(bodyparser.json());
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (whitelist.indexOf(origin) !== -1) {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      if (whitelist.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
         callback(null, true);
       } else {
         callback(new Error("Not allowed by CORS"));
       }
     },
+    credentials: true
   })
 );
 
@@ -49,30 +54,82 @@ const sendEmail = async (subject, message, to, from, attachments = []) => {
     attachments: attachments,
   };
 
-  transporter.sendMail(options, (err, info) => {
-    if (err) {
-      console.log(err);
-    }
+  return new Promise((resolve, reject) => {
+    transporter.sendMail(options, (err, info) => {
+      if (err) {
+        console.log(err);
+        reject(err);
+      } else {
+        resolve(info);
+      }
+    });
   });
 };
 
 app.post("/send_email", async (req, res) => {
-  const { subject, message, attachments } = req.body;
+  const { 
+    subject = "DrawDB Feedback Submission",
+    message, 
+    attachments = [],
+    // Extract form fields that might be present
+    satisfaction,
+    easeOfUse,
+    likelihood,
+    difficulties,
+    triedSimilarApps,
+    occupation,
+    feedbackText
+  } = req.body;
 
   try {
+    // Construct a more structured email from form fields if available
+    let emailContent = message;
+    
+    // If no message is provided but we have form fields, create a structured message
+    if (!message && (satisfaction || easeOfUse || likelihood)) {
+      emailContent = `
+        <h2>DrawDB Feedback Submission</h2>
+        
+        ${satisfaction ? `<p><strong>Satisfaction Rating:</strong> ${satisfaction}/100</p>` : ''}
+        ${easeOfUse ? `<p><strong>Ease of Use Rating:</strong> ${easeOfUse}/100</p>` : ''}
+        ${likelihood ? `<p><strong>Likelihood to Recommend:</strong> ${likelihood}/100</p>` : ''}
+        ${difficulties !== undefined ? `<p><strong>Encountered Difficulties:</strong> ${difficulties ? 'Yes' : 'No'}</p>` : ''}
+        ${triedSimilarApps !== undefined ? `<p><strong>Tried Similar Apps:</strong> ${triedSimilarApps ? 'Yes' : 'No'}</p>` : ''}
+        ${occupation ? `<p><strong>Occupation:</strong> ${occupation}</p>` : ''}
+        
+        ${feedbackText ? `<h3>Feedback:</h3><div>${feedbackText}</div>` : ''}
+        
+        <p><em>Submitted on: ${new Date().toISOString()}</em></p>
+      `;
+    }
+
     await sendEmail(
       subject,
-      `<html><head>${emailStyles}</head><body>${message}</body></html>`,
+      `<html><head>${emailStyles}</head><body>${emailContent}</body></html>`,
       EMAIL_REPORT,
       EMAIL_USER,
       attachments
     );
-    res.status(200).json({ message: "Report submitted!" });
+    
+    res.status(200).json({ message: "Thank you for your feedback!" });
   } catch (e) {
-    res.status(500).json({ error: e });
+    console.error("Error sending email:", e);
+    res.status(500).json({ error: "There was a problem submitting your feedback. Please try again later." });
   }
 });
 
-app.listen(PORT, () => {
-  console.log("Server started");
+// Health check endpoint for API Gateway
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
 });
+
+// If running in local environment
+if (process.env.NODE_ENV === 'development') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server started on port ${PORT}`);
+  });
+}
+
+// Export for Lambda
+module.exports.handler = serverless(app);
